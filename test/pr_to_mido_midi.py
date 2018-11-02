@@ -141,11 +141,66 @@ class frame_midi_converter:
     def __init__(self,
     # a class that converts from raw bytes to (timestamp,activations) pair by
     # calling unpack
-    raw_midi_frame_converter=raw_midi_frame()):
+    raw_midi_frame_converter=raw_midi_frame(),
+    program=0,
+    transposition=0,
+    n_pitches=88,
+    velocity_scalar=100,
+    channel=0):
         self.raw_midi_frame_converter = raw_midi_frame_converter
+        self.transposition = transposition
+        self.velocity_scalar = velocity_scalar
+        # each row of _notes is (start_time,end_time,velocity,pitch)
+        self._notes = np.full((n_pitches,4),0,dtype='float32')
+        self._notes[:,-1]=np.arange(n_pitches)
+        self._last_active = np.full(n_pitches,0,dtype='int32')
+        self.channel = channel
+    
+    def _note_ons_from_notes(self,notes):
+        ret = []
+        for note in notes:
+            ret.append(
+            note_on_midi_msg(
+            channel=self.channel,
+            pitch=int(self.transposition + note[3]),
+            velocity=0))
+        return ret
+
+    def _note_offs_from_notes(self,notes):
+        ret = []
+        for note in notes:
+            ret.append(
+            note_off_midi_msg(
+            channel=self.channel,
+            pitch=int(self.transposition + note[3]),
+            velocity=0))
+        return ret
+            
     def __call__(self,frame):
-        # TODO convert the frame to some midi events, a la
-        # piano_transcriber/midi.py:midi_notes_from_frames
+        # where to hold result     
+        events=[]
+        # unpack timestamp and piano roll activations slice
+        timestamp,pr_slice = self.raw_midi_frame_converter.unpack(frame)
+        # find those that are active currently
+        now_active = (pr_slice > 0).astype('int32')
+        # new notes are ones that weren't active before
+        new_notes = (self._last_active - now_active) < 0
+        # off notes are ones that were active before and are now off
+        off_notes = (self._last_active - now_active) > 0
+        # store the time they went off using the timestamp
+        self._notes[off_notes,1] = timestamp
+        # make into midi note events
+        events += self._note_offs_from_notes(self._notes[off_notes])
+        # now turn them off
+        self._last_active[off_notes] = 0
+        # TODO timestamp not currently used, but available
+        # mido doesn't have that precise of scheduling capabilities
+        self._notes[new_notes,0] = timestamp
+        self._notes[new_notes,2] = pr_slice[new_notes]
+        # make the new notes
+        events += self._note_ons_from_notes(self._notes[new_notes])
+        self._last_active[new_notes] = 1
+        return events
 
 class midi_port:
     def send(ev):
