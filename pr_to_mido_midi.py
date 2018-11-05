@@ -36,7 +36,7 @@ class frame_midi_scheduler(Thread):
     # must have "put" method (e.g., it could be a subclass of queue.Queue)
     midi_event_queue,
     # if an event comes in late, it is discarded
-    discard_late=True
+    discard_late=False
     ): 
         self.frame_stream = frame_stream
         self.counter = counter
@@ -55,6 +55,7 @@ class frame_midi_scheduler(Thread):
                 # counter
                 self.counter.set_count(
                 time_stamp)
+                self.counter.start()
             if self.discard_late and (time_stamp < self.counter.count):
                 # discard, too late
                 continue
@@ -99,6 +100,8 @@ class raw_midi_frame:
         self.n_notes = n_notes
         self.transposition = transposition
         self._unpacker = Struct("d%df" % (self.n_notes,))
+    def packed_size(self):
+        return self._unpacker.size
     def time_stamp(self,frame):
         # parse the time stamp, returns a double
         dat=self._unpacker.unpack(b)
@@ -113,21 +116,35 @@ class raw_midi_frame:
 
 class note_on_midi_msg:
     def __init__(self,
-    channel=0,
     pitch,
-    velocity):
+    velocity,
+    channel=0,
+    ):
         self.channel = channel
         self.pitch = pitch
         self.velocity = velocity
+    def as_mido_midi_msg(self):
+        return mido.Message(
+        'note_on',
+        channel=self.channel,
+        note=self.pitch,
+        velocity=self.velocity)
 
 class note_off_midi_msg:
     def __init__(self,
-    channel=0,
     pitch,
-    velocity):
+    velocity,
+    channel=0,
+    ):
         self.channel = channel
         self.pitch = pitch
         self.velocity = velocity
+    def as_mido_midi_msg(self):
+        return mido.Message(
+        'note_off',
+        channel=self.channel,
+        note=self.pitch,
+        velocity=self.velocity)
 
 class midi_event:
     """ A very simple implementation, just a time stamp and midi message. """
@@ -205,3 +222,29 @@ class frame_midi_converter:
 class midi_port:
     def send(ev):
         return NotImplemented
+
+class mido_midi_port:
+    def __init__(self,
+    # TODO for now just leave port_name as None, it seems like picking a
+    # specific port is broken
+    port_name=None,
+    backend='mido.backends.portmidi'):
+        mido.set_backend(backend)
+        self._port = mido.open_output(port_name)
+    def __del__(self):
+        self._port.close()
+    def send(self,midi_ev):
+        ev = midi_ev.as_mido_midi_msg()
+        self._port.send(ev)
+
+class midi_note_frame_stream_fd:
+    def __init__(self,
+    fd,
+    raw_midi_frame_parser=raw_midi_frame()):
+        self._fd = fd 
+        self._raw_midi_frame_parser = raw_midi_frame_parser
+    def get_frame_parser(self):
+        return self._raw_midi_frame_parser
+    def next_frame(self):
+        dat = self._fd.read(self._raw_midi_frame_parser.packed_size())
+        return dat
