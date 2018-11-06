@@ -26,7 +26,7 @@ while not done:
     out_frame = (np.random.standard_normal(88) > 0).astype('float32')
     out_time = np.array(cur_time,dtype='float64')
     b = out_time.tobytes() + out_frame.tobytes()
-    out_fd.write(b)
+    out_fd.buffer.write(b)
     delta_time = times[np.random.randint(len(times))]
     cur_time += delta_time
     time_jitter = np.random.standard_normal(1)

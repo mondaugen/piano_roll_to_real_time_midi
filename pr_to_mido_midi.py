@@ -4,15 +4,16 @@ from threading import Thread
 from queue import Queue
 import time
 from struct import Struct
+from itertools import cycle
 
 class time_counter(Thread):
     def __init__(self,resolution):
         """ resolution is how often to increment the time counter and by how
         much """
+        Thread.__init__(self)
         self.resolution = resolution
         self.count = 0
         self.done = True
-        Thread.__init__(self)
     def set_count(self,count):
         """ We might not want to start at 0 """
         self.count = count
@@ -38,17 +39,19 @@ class frame_midi_scheduler(Thread):
     # if an event comes in late, it is discarded
     discard_late=False
     ): 
+        Thread.__init__(self)
         self.frame_stream = frame_stream
         self.counter = counter
         self.done = True
         self.frame_midi_converter = frame_midi_converter
         self.midi_event_queue = midi_event_queue
         self.discard_late = discard_late
-        Thread.__init__(self)
     def run(self):
+        print("frame_midi_scheduler starting")
         self.done = False
         while not self.done:
             frame = self.frame_stream.next_frame()
+            #print(frame)
             time_stamp = self.frame_midi_converter.raw_midi_frame_converter.time_stamp(frame)
             if not self.counter.is_alive():
                 # set the intial time to the time of this frame and start the
@@ -65,6 +68,7 @@ class frame_midi_scheduler(Thread):
             # empty)
             for event in midi_events:
                 self.midi_event_queue.put(event)
+            time.sleep(0.1)
 
 class midi_event_player(Thread):
     def __init__(self,
@@ -74,21 +78,29 @@ class midi_event_player(Thread):
     counter,
     # something responding to the send message, which will take midi events
     midi_port):
+        Thread.__init__(self)
         self.done = True
         self.midi_event_queue = midi_event_queue
         self.counter = counter
         self.midi_port = midi_port
-        Thread.__init__(self)
     def run(self):
+        print("midi_event_player starting")
         self.done = False
         while not self.done:
-            while self.counter.count > self.midi_event_queue.queue[0].time_stamp:
-                # TODO in a real time context, you would use a non-blocking get,
-                # and keep looping until the queue is available, but then you
-                # also wouldn't send the MIDI events this way (you would queue
-                # them to the hardware with a time stamp)
-                ev = self.midi_event_queue.get()
+            #if (len(self.midi_event_queue.queue) > 0):
+            #    print(self.midi_event_queue.queue[0].timestamp)
+            #    print(self.counter.count)
+            #while ((self.midi_event_queue.qsize() > 0) and 
+            #(self.counter.count > self.midi_event_queue.queue[0].timestamp)):
+            ev = self.midi_event_queue.get()
+            if ev.timestamp <= self.counter.count:
                 self.midi_port.send(ev)
+                #print("timestamp: %f" % (ev.timestamp,))
+                #print("counter: %f" % (self.counter.count,))
+            else:
+                # put back
+                self.midi_event_queue.put(ev)
+                time.sleep(0.1)
 
 class raw_midi_frame:
     """ Routines for converting packed bytes into a midi event """
@@ -104,7 +116,7 @@ class raw_midi_frame:
         return self._unpacker.size
     def time_stamp(self,frame):
         # parse the time stamp, returns a double
-        dat=self._unpacker.unpack(b)
+        dat=self._unpacker.unpack(frame)
         ts = dat[0]
         return ts
     def unpack(self,b):
@@ -114,12 +126,20 @@ class raw_midi_frame:
         act = np.array(dat[1:],dtype='float32')
         return (ts,act)
 
-class note_on_midi_msg:
+class midi_msg:
+    def __init__(self,timestamp):
+        self.timestamp = timestamp
+    def __lt__(self, other):
+        return (self.timestamp < other.timestamp)
+
+class note_on_midi_msg(midi_msg):
     def __init__(self,
+    timestamp,
     pitch,
     velocity,
     channel=0,
     ):
+        midi_msg.__init__(self,timestamp)
         self.channel = channel
         self.pitch = pitch
         self.velocity = velocity
@@ -129,13 +149,17 @@ class note_on_midi_msg:
         channel=self.channel,
         note=self.pitch,
         velocity=self.velocity)
+    def __str__(self):
+        return "note_on %d %d %d" % (self.channel,self.pitch,self.velocity)
 
-class note_off_midi_msg:
+class note_off_midi_msg(midi_msg):
     def __init__(self,
+    timestamp,
     pitch,
     velocity,
     channel=0,
     ):
+        midi_msg.__init__(self,timestamp)
         self.channel = channel
         self.pitch = pitch
         self.velocity = velocity
@@ -145,6 +169,8 @@ class note_off_midi_msg:
         channel=self.channel,
         note=self.pitch,
         velocity=self.velocity)
+    def __str__(self):
+        return "note_off %d %d %d" % (self.channel,self.pitch,self.velocity)
 
 class midi_event:
     """ A very simple implementation, just a time stamp and midi message. """
@@ -178,9 +204,10 @@ class frame_midi_converter:
         for note in notes:
             ret.append(
             note_on_midi_msg(
+            timestamp=note[1],
             channel=self.channel,
-            pitch=int(self.transposition + note[3]),
-            velocity=0))
+            pitch=int(self.transposition + note[-1]),
+            velocity=self.velocity_scalar))
         return ret
 
     def _note_offs_from_notes(self,notes):
@@ -188,8 +215,9 @@ class frame_midi_converter:
         for note in notes:
             ret.append(
             note_off_midi_msg(
+            timestamp=note[1],
             channel=self.channel,
-            pitch=int(self.transposition + note[3]),
+            pitch=int(self.transposition + note[-1]),
             velocity=0))
         return ret
             
@@ -235,6 +263,7 @@ class mido_midi_port:
         self._port.close()
     def send(self,midi_ev):
         ev = midi_ev.as_mido_midi_msg()
+        print("sending: " + str(ev))
         self._port.send(ev)
 
 class midi_note_frame_stream_fd:
@@ -246,5 +275,45 @@ class midi_note_frame_stream_fd:
     def get_frame_parser(self):
         return self._raw_midi_frame_parser
     def next_frame(self):
-        dat = self._fd.read(self._raw_midi_frame_parser.packed_size())
+        dat = b''
+        dat_rem = self._raw_midi_frame_parser.packed_size()
+        while dat_rem > 0:
+            dat += self._fd.buffer.read(dat_rem)
+            dat_rem = self._raw_midi_frame_parser.packed_size() - len(dat)
         return dat
+
+class test_midi_note_frame_stream:
+    """ A fake midi note stream. """
+    def __init__(self,
+    # number of notes in frame
+    n_notes=88,
+    # possible delay times for a note
+    times=[1.0],
+    raw_midi_frame_parser=raw_midi_frame(),
+    prob_on=0.5):
+        self.n_notes = n_notes
+        self.times = times
+        self.cur_time = 0
+        self._raw_midi_frame_parser = raw_midi_frame_parser
+        self.prob_on = prob_on
+        self._note_vects=[
+        np.zeros(n_notes,dtype='float32') for _ in range(4)]
+        self._note_vects[0][40] = 1
+        self._note_vects[1][47] = 1
+        self._note_vects[2][44] = 1
+        self.note_vects = cycle(self._note_vects)
+    def get_frame_parser(self):
+        return self._raw_midi_frame_parser
+    def next_frame(self):
+        """ Get a frame with fake delay """
+        delta_time = self.times[np.random.randint(len(self.times))]
+        print(delta_time)
+        # time jitter really screws stuff up
+        time_jitter = 0 #np.random.standard_normal(1)*0.001
+        time.sleep(max(delta_time+time_jitter,0))
+        self.cur_time += delta_time
+        #out_frame = (np.random.uniform(0,1,88) > (1 - self.prob_on)).astype('float32')
+        out_frame = next(self.note_vects)
+        out_time = np.array(self.cur_time,dtype='float64')
+        b = out_time.tobytes() + out_frame.tobytes()
+        return b

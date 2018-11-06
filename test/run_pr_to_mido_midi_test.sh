@@ -12,7 +12,7 @@ kill_all ()
 {
     if [ -a /tmp/.$$_pids ]; then
         for pid in $(< /tmp/.$$_pids); do
-            kill -2 $pid >/dev/null 2>&1
+            kill -s SIGINT $pid >/dev/null 2>&1
         done
         echo "removing /tmp/.$$_pids"
         rm /tmp/.$$_pids
@@ -54,13 +54,16 @@ trap on_quit SIGINT
 
 mkfifo "$fifo_name"
 # launch fluidsynth which will accept midi messages
-launch_ fluidsynth -i -s -m coremidi -a coreaudio -p my_fluid_synth ~/Documents/sounds/sf2/TimGM6mb.sf2
-sleep 1
+# launch_ fluidsynth -s -m coremidi -a coreaudio -p my_fluid_synth ~/Documents/sounds/sf2/TimGM6mb.sf2
+# launch fluidsynth with test/launch_fluidsynth.sh because it doesn;t seem to survive in the background
+ps aux|grep fluidsynth
 # launch fake MIDI source
-launch_ python3 test/fake_streamer.py "$fifo_name"
+#launch_ python3 test/fake_streamer.py "$fifo_name"
 sleep 1
 # launch midi parser which should send events to fluidsynth
-launch_ python3 test/pr_to_mido_midi_test.py "$fifo_name"
+#python3 test/pr_to_mido_midi_test.py "$fifo_name"
+#python3 -m pdb test/pr_to_mido_midi_test.py "$fifo_name"
+launch_ python3 test/fake_streamer.py | launch_ python3 test/pr_to_mido_midi_test.py
 
 wait_all
 # in case of error
